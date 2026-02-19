@@ -1,0 +1,13 @@
+[project]
+name = "runpod-ssh-mcp-server"
+version = "0.1.0"
+description = "MCP server for executing commands on a remote RunPod GPU server via SSH"
+requires-python = ">=3.10"
+dependencies = ["mcp[cli]", "paramiko"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
