@@ -58,9 +58,6 @@ Paramiko is used for the SSH connection and SFTP upload/download while FastMCP i
 | `download_file` | Download a file from RunPod via SFTP | Direct only |
 | `start_background_job` | Run a command in a tmux session | Both |
 | `check_job` | Get recent output from a tmux session | Both |
-| `gpu_status` | Get GPU status from nvidia-smi | Both |
-| `list_files` | List directory contents | Both |
-| `read_file` | Read a file on RunPod | Both |
 
 ## Configuration
 
