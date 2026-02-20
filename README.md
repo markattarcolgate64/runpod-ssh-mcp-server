@@ -1,4 +1,6 @@
-# RunPod SSH MCP Server
+# RunPod SSH MCP Server - Mark Attar 
+
+I made this because I was tired of having to copy paste RunPod output to my coding agent instances
 
 MCP server that lets Claude Code execute commands on a remote RunPod GPU server via SSH.
 
@@ -15,29 +17,32 @@ uv sync
 | Tool | Description |
 |------|-------------|
 | `run_command` | Execute a shell command on RunPod |
-| `gpu_status` | Quick `nvidia-smi` summary |
-| `list_files` | List directory contents |
-| `read_file` | Read a remote file |
 | `start_background_job` | Run a command in a tmux session |
 | `check_job` | Get recent output from a tmux session |
 
-## Environment Variables
+## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RUNPOD_HOST` | `ssh.runpod.io` | SSH hostname |
-| `RUNPOD_PORT` | `22` | SSH port |
-| `RUNPOD_USER` | — | RunPod SSH username |
-| `SSH_KEY_PATH` | `~/.ssh/id_ed25519` | Path to SSH private key |
+Create `~/.config/runpod-ssh.json` with your pod's connection details:
+
+```json
+{
+  "host": "ssh.runpod.io",
+  "port": 22,
+  "user": "<your-runpod-user>",
+  "ssh_key_path": "~/.ssh/id_ed25519"
+}
+```
+
+To switch pods, just edit this file — no need to re-register the MCP server.
+
+Falls back to environment variables (`RUNPOD_HOST`, `RUNPOD_PORT`, `RUNPOD_USER`, `SSH_KEY_PATH`) if the config file doesn't exist.
 
 ## Register with Claude Code
 
+One-time setup:
+
 ```bash
 claude mcp add --transport stdio --scope user \
-  --env RUNPOD_HOST=ssh.runpod.io \
-  --env RUNPOD_USER=<your-runpod-user> \
-  --env RUNPOD_PORT=22 \
-  --env SSH_KEY_PATH=~/.ssh/id_ed25519 \
   runpod-gpu -- uv run ~/Developer/runpod-ssh-mcp-server/server.py
 ```
 

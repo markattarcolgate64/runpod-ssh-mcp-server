@@ -1,8 +1,10 @@
 """RunPod SSH MCP Server — execute commands on a remote RunPod GPU server."""
 
+import json
 import os
 import sys
 import logging
+from pathlib import Path
 
 import paramiko
 from mcp.server.fastmcp import FastMCP
@@ -14,12 +16,27 @@ logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Configuration from environment
+# Configuration: config file (~/.config/runpod-ssh.json) → env vars → defaults
 # ---------------------------------------------------------------------------
-RUNPOD_HOST = os.environ.get("RUNPOD_HOST", "ssh.runpod.io")
-RUNPOD_PORT = int(os.environ.get("RUNPOD_PORT", "22"))
-RUNPOD_USER = os.environ.get("RUNPOD_USER", "")
-SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
+CONFIG_PATH = Path.home() / ".config" / "runpod-ssh.json"
+
+
+def _load_config() -> dict:
+    """Load connection config from JSON file, falling back to env vars."""
+    cfg = {}
+    if CONFIG_PATH.exists():
+        try:
+            cfg = json.loads(CONFIG_PATH.read_text())
+            log.info("Loaded config from %s", CONFIG_PATH)
+        except (json.JSONDecodeError, OSError) as e:
+            log.warning("Failed to read %s: %s — falling back to env vars", CONFIG_PATH, e)
+
+    return {
+        "host": cfg.get("host") or os.environ.get("RUNPOD_HOST", "ssh.runpod.io"),
+        "port": int(cfg.get("port") or os.environ.get("RUNPOD_PORT", "22")),
+        "user": cfg.get("user") or os.environ.get("RUNPOD_USER", ""),
+        "ssh_key_path": cfg.get("ssh_key_path") or os.environ.get("SSH_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519")),
+    }
 
 # ---------------------------------------------------------------------------
 # SSH helper
@@ -27,24 +44,90 @@ SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25
 
 def _get_ssh_client() -> paramiko.SSHClient:
     """Create a fresh SSH connection to RunPod."""
+    cfg = _load_config()
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    key = paramiko.Ed25519Key.from_private_key_file(SSH_KEY_PATH)
-    client.connect(hostname=RUNPOD_HOST, port=RUNPOD_PORT, username=RUNPOD_USER, pkey=key)
+    key = paramiko.Ed25519Key.from_private_key_file(cfg["ssh_key_path"])
+    client.connect(hostname=cfg["host"], port=cfg["port"], username=cfg["user"], pkey=key)
     return client
 
 
 def _exec(command: str, timeout: int = 30) -> dict:
-    """Run a command over SSH and return stdout, stderr, exit_code."""
+    """Run a command over SSH and return stdout, stderr, exit_code.
+
+    Uses invoke_shell because RunPod's SSH proxy requires a PTY and
+    rejects plain exec_command.
+    """
+    import re
+    import time
+
     client = _get_ssh_client()
     try:
-        stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-        exit_code = stdout.channel.recv_exit_status()
-        return {
-            "stdout": stdout.read().decode(errors="replace"),
-            "stderr": stderr.read().decode(errors="replace"),
-            "exit_code": exit_code,
-        }
+        channel = client.invoke_shell()
+        channel.settimeout(timeout)
+
+        # Wait for initial shell prompt / banner
+        time.sleep(1)
+        if channel.recv_ready():
+            channel.recv(65536)  # discard
+
+        # Send command with explicit markers so we can extract just its output
+        start_marker = "__CMD_START__"
+        end_marker = "__CMD_END__"
+        exit_marker = "__EXIT_CODE__"
+        channel.sendall(
+            f"echo {start_marker}\n{command}\n"
+            f"echo {end_marker}\necho {exit_marker}$?\nexit\n".encode()
+        )
+
+        # Read all output until channel closes
+        output = b""
+        while True:
+            try:
+                chunk = channel.recv(65536)
+                if not chunk:
+                    break
+                output += chunk
+            except Exception:
+                break
+
+        channel.close()
+
+        # Strip ANSI escape codes
+        ansi_re = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07?")
+        text = ansi_re.sub("", output.decode(errors="replace"))
+
+        lines = text.splitlines()
+
+        # Extract exit code
+        exit_code = 0
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(exit_marker):
+                try:
+                    exit_code = int(stripped[len(exit_marker):].strip())
+                except ValueError:
+                    pass
+
+        # Extract only lines between start and end markers
+        capturing = False
+        captured = []
+        for line in lines:
+            stripped = line.strip()
+            if start_marker in stripped:
+                capturing = True
+                continue
+            if end_marker in stripped:
+                capturing = False
+                continue
+            if capturing:
+                # Skip the echoed command line (shell prompt + command)
+                if stripped.endswith(f"# {command}") or stripped == command:
+                    continue
+                captured.append(line)
+
+        stdout_text = "\n".join(captured).strip()
+        return {"stdout": stdout_text, "stderr": "", "exit_code": exit_code}
     finally:
         client.close()
 
@@ -74,41 +157,6 @@ def run_command(command: str, timeout: int = 30, workdir: str | None = None) -> 
     if result["exit_code"] != 0:
         parts.append(f"[exit_code: {result['exit_code']}]")
     return "\n".join(parts) or "(no output)"
-
-
-@mcp.tool()
-def gpu_status() -> str:
-    """Get GPU status from nvidia-smi on the remote RunPod server."""
-    result = _exec("nvidia-smi", timeout=10)
-    if result["exit_code"] != 0:
-        return f"nvidia-smi failed: {result['stderr']}"
-    return result["stdout"]
-
-
-@mcp.tool()
-def list_files(path: str = "/workspace") -> str:
-    """List directory contents on the remote RunPod server.
-
-    Args:
-        path: Directory path to list (default: /workspace).
-    """
-    result = _exec(f"ls -la {path}", timeout=10)
-    if result["exit_code"] != 0:
-        return f"Error: {result['stderr']}"
-    return result["stdout"]
-
-
-@mcp.tool()
-def read_file(path: str) -> str:
-    """Read a file from the remote RunPod server.
-
-    Args:
-        path: Absolute path to the file to read.
-    """
-    result = _exec(f"cat {path}", timeout=10)
-    if result["exit_code"] != 0:
-        return f"Error: {result['stderr']}"
-    return result["stdout"]
 
 
 @mcp.tool()
