@@ -46,7 +46,7 @@ The server supports two connection modes, detected automatically from the SSH st
 
 To switch pods, just call `connect` again with the new SSH string.
 
-Paramiko is used for the SSH connection and SFTP upload/download. 
+Paramiko is used for the SSH connection and SFTP upload/download while FastMCP is used to package the MCP. 
 
 ## Tools
 
